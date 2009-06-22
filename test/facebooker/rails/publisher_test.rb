@@ -395,27 +395,27 @@ class Facebooker::Rails::Publisher::PublisherTest < Test::Unit::TestCase
     TestPublisher.deliver_user_action_no_data(@from_user)
   end
   def test_no_sends_as_raises
-    assert_raises(Facebooker::Rails::Publisher::UnspecifiedBodyType) {
+    assert_raises(Facebooker::Rails::Publisher::UnspecifiedBodyType) do
       TestPublisher.deliver_no_send_as(@user)
-    }
+    end
   end
 
   def test_invalid_send_as_raises
-    assert_raises(Facebooker::Rails::Publisher::UnknownBodyType) {
+    assert_raises(Facebooker::Rails::Publisher::UnknownBodyType) do
       TestPublisher.deliver_invalid_send_as(@user)
-    }
+    end
   end
 
 
   def test_keeps_class_method_missing
-    assert_raises(NoMethodError) {
+    assert_raises(NoMethodError) do
       TestPublisher.fake
-    }
+    end
   end
   def test_keeps_instance_method_missing
-    assert_raises(NoMethodError) {
+    assert_raises(NoMethodError) do
       TestPublisher.new.fake
-    }
+    end
   end
 
   def test_image_urls
