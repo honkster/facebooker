@@ -13,6 +13,7 @@ require 'facebooker/rails/controller'
 require 'facebooker/rails/helpers/fb_connect'
 require 'facebooker/rails/helpers'
 require 'facebooker/rails/publisher'
+require 'facebooker/rails/publisher/facebook_template'
 require 'facebooker/rails/facebook_form_builder'
 
 ActionController::Routing::Routes.draw do |map|

@@ -161,46 +161,46 @@ class Facebooker::Rails::Publisher::FacebookTemplateTest < Test::Unit::TestCase
 
   end
 
-  def test_find_cached_should_call_find_in_db_if_not_in_cache
-    FacebookTemplate.expects(:find_in_db).with(TestPublisher,"simple_user_action").returns(@template)
+  def test_find_cached_should_call_find_in_store_if_not_in_cache
+    FacebookTemplate.expects(:find_in_store).with(TestPublisher,"simple_user_action").returns(@template)
     assert_equal FacebookTemplate.find_cached(TestPublisher,"simple_user_action"), @template
   end
 
-  def test_find_in_db_should_run_find
-    FacebookTemplate.expects(:find_by_template_name).with("TestPublisher::simple_user_action").returns(@template)
+  def test_find_in_store_should_run_find
+    FacebookTemplate.store.expects(:find_by_template_name).with("TestPublisher::simple_user_action").returns(@template)
     @template.stubs(:template_changed?).returns(false)
-    assert_equal FacebookTemplate.find_in_db(TestPublisher,"simple_user_action"), @template
+    assert_equal FacebookTemplate.find_in_store(TestPublisher,"simple_user_action"), @template
   end
 
-  def test_find_in_db_should_register_if_not_found
-    FacebookTemplate.expects(:find_by_template_name).with("TestPublisher::simple_user_action").returns(nil)
+  def test_find_in_store_should_register_if_not_found
+    FacebookTemplate.store.expects(:find_by_template_name).with("TestPublisher::simple_user_action").returns(nil)
     FacebookTemplate.expects(:register).with(TestPublisher,"simple_user_action").returns(@template)
     FacebookTemplate.find_cached(TestPublisher,"simple_user_action")
 
   end
 
-  def test_find_in_db_should_check_for_change_if_found
-    FacebookTemplate.stubs(:find_by_template_name).returns(@template)
+  def test_find_in_store_should_check_for_change_if_found
+    FacebookTemplate.store.stubs(:find_by_template_name).returns(@template)
     FacebookTemplate.stubs(:hashed_content).returns("MY CONTENT")
     @template.expects(:template_changed?).with("MY CONTENT").returns(false)
-    FacebookTemplate.find_in_db(TestPublisher,"simple_user_action")
+    FacebookTemplate.find_in_store(TestPublisher,"simple_user_action")
   end
 
-  def test_find_in_db_should_destroy_old_record_if_changed
-    FacebookTemplate.stubs(:find_by_template_name).returns(@template)
+  def test_find_in_store_should_destroy_old_record_if_changed
+    FacebookTemplate.store.stubs(:find_by_template_name).returns(@template)
     FacebookTemplate.stubs(:hashed_content).returns("MY CONTENT")
     @template.stubs(:template_changed?).returns(true)
     @template.expects(:destroy)
-    FacebookTemplate.find_in_db(TestPublisher,"simple_user_action")
+    FacebookTemplate.find_in_store(TestPublisher,"simple_user_action")
   end
 
-  def test_find_in_db_should_re_register_if_changed
-    FacebookTemplate.stubs(:find_by_template_name).with("TestPublisher::simple_user_action").returns(@template)
+  def test_find_in_store_should_re_register_if_changed
+    FacebookTemplate.store.stubs(:find_by_template_name).with("TestPublisher::simple_user_action").returns(@template)
     FacebookTemplate.stubs(:hashed_content).returns("MY CONTENT")
     @template.stubs(:template_changed?).returns(true)
     @template.stubs(:destroy)
     FacebookTemplate.expects(:register).with(TestPublisher,"simple_user_action").returns(@template)
-    FacebookTemplate.find_in_db(TestPublisher,"simple_user_action")
+    FacebookTemplate.find_in_store(TestPublisher,"simple_user_action")
   end
 end
 
