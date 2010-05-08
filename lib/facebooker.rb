@@ -1,5 +1,10 @@
 unless defined?(ActiveSupport) and defined?(ActiveSupport::JSON)
-  require 'json'
+  begin
+    require 'json'
+  rescue LoadError
+    gem "json_pure"
+    require "json"
+  end
   module Facebooker
     def self.json_decode(str)
       JSON.parse(str)
@@ -26,23 +31,23 @@ require 'digest/md5'
 
 module Facebooker
 
-    @facebooker_configuration = {}
-    @current_adapter = nil
-    @set_asset_host_to_callback_url = true
-    @path_prefix = nil
-    @use_curl    = false
+  @facebooker_configuration = {}
+  @raw_facebooker_configuration = {}
+  @current_adapter = nil
+  @set_asset_host_to_callback_url = true
+  @path_prefix = nil
+  @use_curl    = false
 
-    class << self
+  class << self
 
     def load_configuration(facebooker_yaml_file)
-      if File.exist?(facebooker_yaml_file)
-        if defined? RAILS_ENV
-          config = YAML.load_file(facebooker_yaml_file)[RAILS_ENV] 
-        else
-          config = YAML.load_file(facebooker_yaml_file)           
-        end
-        apply_configuration(config)
+      return false unless File.exist?(facebooker_yaml_file)
+      @raw_facebooker_configuration = YAML.load(ERB.new(File.read(facebooker_yaml_file)).result)
+      if defined? RAILS_ENV
+        @raw_facebooker_configuration = @raw_facebooker_configuration[RAILS_ENV]
       end
+      Thread.current[:fb_api_config] = @raw_facebooker_configuration unless Thread.current[:fb_api_config]
+      apply_configuration(@raw_facebooker_configuration)
     end
 
     # Sets the Facebook environment based on a hash of options. 
@@ -60,11 +65,68 @@ module Facebooker
         ActionController::Base.asset_host = config['callback_url'] 
       end
       Facebooker.timeout = config['timeout']
-      @facebooker_configuration = config
+
+      @facebooker_configuration = config  # must be set before adapter loaded
+      load_adapter(:fb_sig_api_key => config['api_key'])
+      facebooker_config
     end
 
     def facebooker_config
       @facebooker_configuration
+    end
+
+    def with_application(api_key, &block)
+      config = fetch_config_for( api_key )
+
+      unless config
+        self.logger.info "Can't find facebooker config: '#{api_key}'" if self.logger
+        yield if block_given?
+        return
+      end
+
+      # Save the old config to handle nested activation. If no app context is
+      # set yet, use default app's configuration.
+      old = Thread.current[:fb_api_config] ? Thread.current[:fb_api_config].dup : @raw_facebooker_configuration
+
+      if block_given?
+        begin
+          self.logger.info "Swapping facebooker config: '#{api_key}'" if self.logger
+          Thread.current[:fb_api_config] = apply_configuration(config)
+          yield
+        ensure
+          Thread.current[:fb_api_config] = old if old && !old.empty?
+          apply_configuration(Thread.current[:fb_api_config])
+        end
+      end
+    end
+
+    def all_api_keys
+      [
+        @raw_facebooker_configuration['api_key']
+      ] + (
+        @raw_facebooker_configuration['alternative_keys'] ?
+        @raw_facebooker_configuration['alternative_keys'].keys :
+        []
+      )
+    end
+
+    def with_all_applications(&block)
+      all_api_keys.each do |current_api_key|
+        with_application(current_api_key) do
+          block.call
+        end
+      end
+    end
+
+    def fetch_config_for(api_key)
+      if @raw_facebooker_configuration['api_key'] == api_key
+        return @raw_facebooker_configuration
+      elsif @raw_facebooker_configuration['alternative_keys'] and
+            @raw_facebooker_configuration['alternative_keys'].keys.include?(api_key)
+        return @raw_facebooker_configuration['alternative_keys'][api_key].merge(
+                'api_key' => api_key )
+      end
+      return false
     end
 
     # TODO: This should be converted to attr_accessor, but we need to
@@ -107,7 +169,7 @@ module Facebooker
       @timeout
     end
 
-    [:api_key,:secret_key, :www_server_base_url,:login_url_base,:install_url_base,:api_rest_path,:api_server_base,:api_server_base_url,:canvas_server_base, :video_server_base].each do |delegated_method|
+    [:api_key,:secret_key, :www_server_base_url,:login_url_base,:install_url_base,:permission_url_base,:connect_permission_url_base,:api_rest_path,:api_server_base,:api_server_base_url,:canvas_server_base, :video_server_base].each do |delegated_method|
       define_method(delegated_method){ return current_adapter.send(delegated_method)}
     end
 
@@ -143,21 +205,40 @@ module Facebooker
   end
 end
 
+require 'facebooker/attachment'
 require 'facebooker/batch_request'
 require 'facebooker/feed'
 require 'facebooker/logging'
 require 'facebooker/model'
 require 'facebooker/parser'
 require 'facebooker/service'
+require 'facebooker/service/base_service'
+#optional HTTP service adapters
+begin
+  require 'facebooker/service/curl_service' 
+rescue LoadError
+  nil
+end
+begin
+  require 'facebooker/service/typhoeus_service'
+  require 'facebooker/service/typhoeus_multi_service'
+rescue LoadError
+  nil
+end
+
+require 'facebooker/service/net_http_service'
 require 'facebooker/server_cache'
 require 'facebooker/data'
 require 'facebooker/admin'
+require 'facebooker/application'
 require 'facebooker/mobile'
 require 'facebooker/session'
+require 'facebooker/stream_post'
 require 'facebooker/version'
 require 'facebooker/models/location'
 require 'facebooker/models/affiliation'
 require 'facebooker/models/album'
+require 'facebooker/models/comment'
 require 'facebooker/models/education_info'
 require 'facebooker/models/work_info'
 require 'facebooker/models/event'
@@ -174,6 +255,7 @@ require 'facebooker/models/info_item'
 require 'facebooker/models/info_section'
 require 'facebooker/models/friend_list'
 require 'facebooker/models/video'
+require 'facebooker/models/message_thread'
 require 'facebooker/adapters/adapter_base'
 require 'facebooker/adapters/facebook_adapter'
 require 'facebooker/adapters/bebo_adapter'

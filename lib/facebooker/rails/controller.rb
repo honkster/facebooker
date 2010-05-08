@@ -7,7 +7,6 @@ module Facebooker
       include Facebooker::Rails::ProfilePublisherExtensions
       def self.included(controller)
         controller.extend(ClassMethods)
-        controller.before_filter :set_adapter 
         controller.before_filter :set_facebook_request_format
         controller.helper_attr :facebook_session_parameters
         controller.helper_method :request_comes_from_facebook?
@@ -29,6 +28,12 @@ module Facebooker
       
       def create_facebook_session
         secure_with_facebook_params! || secure_with_cookies! || secure_with_token!
+      end
+      
+      #this is used to proxy a connection through a rails app so the facebook secret key is not needed
+      #iphone apps use this
+      def create_facebook_session_with_secret
+        secure_with_session_secret!
       end
       
       def set_facebook_session
@@ -121,20 +126,20 @@ module Facebooker
       end
 
       def fb_cookie_names
-        fb_cookie_names = cookies.keys.select{|k| k.starts_with?(fb_cookie_prefix)}
+        fb_cookie_names = cookies.keys.select{|k| k && k.to_s.starts_with?(fb_cookie_prefix)}
       end
 
       def secure_with_cookies!
           parsed = {}
-          
+
           fb_cookie_names.each { |key| parsed[key[fb_cookie_prefix.size,key.size]] = cookies[key] }
- 
+
           #returning gracefully if the cookies aren't set or have expired
           return unless parsed['session_key'] && parsed['user'] && parsed['expires'] && parsed['ss'] 
-          return unless Time.at(parsed['expires'].to_s.to_f) > Time.now || (parsed['expires'] == "0")          
+          return unless (Time.at(parsed['expires'].to_s.to_f) > Time.now) || (parsed['expires'] == "0")      
           #if we have the unexpired cookies, we'll throw an exception if the sig doesn't verify
-          verify_signature(parsed,cookies[Facebooker.api_key])
-          
+          verify_signature(parsed,cookies[Facebooker.api_key], true)
+
           @facebook_session = new_facebook_session
           @facebook_session.secure_with!(parsed['session_key'],parsed['user'],parsed['expires'],parsed['ss'])
           @facebook_session
@@ -145,6 +150,15 @@ module Facebooker
           @facebook_session = new_facebook_session
           @facebook_session.auth_token = params['auth_token']
           @facebook_session.secure!
+          @facebook_session
+        end
+      end
+    
+      def secure_with_session_secret!
+        if params['auth_token']
+          @facebook_session = new_facebook_session
+          @facebook_session.auth_token = params['auth_token']
+          @facebook_session.secure_with_session_secret!
           @facebook_session
         end
       end
@@ -163,11 +177,19 @@ module Facebooker
       def after_facebook_login_url
         nil
       end
+
+      def default_after_facebook_login_url
+        omit_keys = ["_method", "format"]
+        options = (params||{}).clone 
+        options = options.reject{|k,v| k.to_s.match(/^fb_sig/) or omit_keys.include?(k.to_s)} 
+        options = options.merge({:only_path => false})
+        url_for(options)
+      end
       
       def create_new_facebook_session_and_redirect!
         session[:facebook_session] = new_facebook_session
-        url_params = after_facebook_login_url.nil? ? {} : {:next=>after_facebook_login_url}
-        top_redirect_to session[:facebook_session].login_url(url_params) unless @installation_required
+        next_url = after_facebook_login_url || default_after_facebook_login_url
+        top_redirect_to session[:facebook_session].login_url({:next => next_url, :canvas=>params[:fb_sig_in_canvas]}) unless @installation_required
         false
       end
       
@@ -182,10 +204,6 @@ module Facebooker
             User.new(friend_uid, facebook_session)
           end
         end
-      end
-            
-      def blank?(value)
-        (value == '0' || value.nil? || value == '')        
       end
 
       def verified_facebook_params
@@ -205,14 +223,13 @@ module Facebooker
         48.hours.ago
       end
       
-      def verify_signature(facebook_sig_params,expected_signature)
+      def verify_signature(facebook_sig_params,expected_signature,force=false)
         # Don't verify the signature if rack has already done so.
-        if ::Rails.version >= "2.3"
-          return if ActionController::Dispatcher.middleware.include? Rack::Facebook
+        unless ::Rails.version >= "2.3" and ActionController::Dispatcher.middleware.include? Rack::Facebook and !force
+          raw_string = facebook_sig_params.map{ |*args| args.join('=') }.sort.join
+          actual_sig = Digest::MD5.hexdigest([raw_string, Facebooker::Session.secret_key].join)
+          raise Facebooker::Session::IncorrectSignature if actual_sig != expected_signature
         end
-        raw_string = facebook_sig_params.map{ |*args| args.join('=') }.sort.join
-        actual_sig = Digest::MD5.hexdigest([raw_string, Facebooker::Session.secret_key].join)
-        raise Facebooker::Session::IncorrectSignature if actual_sig != expected_signature
         raise Facebooker::Session::SignatureTooOld if facebook_sig_params['time'] && Time.at(facebook_sig_params['time'].to_f) < earliest_valid_session
         true
       end
@@ -221,15 +238,15 @@ module Facebooker
         @facebook_parameter_conversions ||= Hash.new do |hash, key| 
           lambda{|value| value}
         end.merge(
-          'time' => lambda{|value| Time.at(value.to_f)},
-          'in_canvas' => lambda{|value| !blank?(value)},
-          'added' => lambda{|value| !blank?(value)},
-          'expires' => lambda{|value| blank?(value) ? nil : Time.at(value.to_f)},
-          'friends' => lambda{|value| value.split(/,/)}
+          'time'      => lambda{|value| Time.at(value.to_f)},
+          'in_canvas' => lambda{|value| one_or_true(value)},
+          'added'     => lambda{|value| one_or_true(value)},
+          'expires'   => lambda{|value| zero_or_false(value) ? nil : Time.at(value.to_f)},
+          'friends'   => lambda{|value| value.split(/,/)}
         )
       end
       
-      def fbml_redirect_tag(url)
+      def fbml_redirect_tag(url,*args)
         "<fb:redirect url=\"#{url_for(url)}\" />"
       end
       
@@ -277,6 +294,9 @@ module Facebooker
       def ensure_has_create_listing
         has_extended_permission?("create_listing") || application_needs_permission("create_listing")
       end
+      def ensure_has_create_event
+        has_extended_permission?("create_event") || application_needs_permission("create_event")
+      end
       
       def application_needs_permission(perm)
         top_redirect_to(facebook_session.permission_url(perm))
@@ -298,8 +318,8 @@ module Facebooker
       end
       
       def application_is_not_installed_by_facebook_user
-        url_params = after_facebook_login_url.nil? ? {} : { :next => after_facebook_login_url }
-        top_redirect_to session[:facebook_session].install_url(url_params)
+        next_url = after_facebook_login_url || default_after_facebook_login_url
+        top_redirect_to session[:facebook_session].install_url({:next => next_url})
       end
       
       def set_facebook_request_format
@@ -310,10 +330,6 @@ module Facebooker
         end
       end
       
-      def set_adapter
-        Facebooker.load_adapter(params) if(params[:fb_sig_api_key])
-      end
-
       
       module ClassMethods
         #

@@ -1,5 +1,11 @@
 require 'rexml/document'
 require 'facebooker/session'
+
+begin
+    require 'nokogiri'
+rescue Exception
+end
+
 module Facebooker
   class Parser
 
@@ -57,10 +63,15 @@ module Facebooker
 
     def self.element(name, data)
       data = data.body rescue data # either data or an HTTP response
-      begin
-        node = Nokogiri::XML(data.strip).at(name)
-        return node if node
-      rescue # Can't parse with Nokogiri
+      if Object.const_defined?(:Nokogiri)
+        xml = Nokogiri::XML(data.strip)
+        if node = xml.at(name)
+          return node
+        end
+        if xml.root.name == name
+          return xml.root
+        end
+      else
         doc = REXML::Document.new(data)
         doc.elements.each(name) do |element|
           return element
@@ -68,12 +79,17 @@ module Facebooker
       end
       raise "Element #{name} not found in #{data}"
     end
-
+    
     def self.hash_or_value_for(element)
       if element.children.size == 1 && element.children.first.text?
         element.content.strip
       else
-        hashinate(element)
+        # We can have lists in not list item
+        if element['list'] == 'true'
+          element.children.reject{|c| c.text? }.map { |subchild| hash_or_value_for(subchild)}
+        else
+          hashinate(element)
+        end
       end
     end
 
@@ -97,6 +113,44 @@ module Facebooker
         hash
       end #do |hash, child|
     end
+    
+    def self.hash_by_key_or_value_for(element, convert_1_to_true=false)
+      if element.children.size == 0
+        { element['key'] => nil }
+      elsif element.children.size == 1 && element.children.first.text?
+        { element['key'] => (convert_1_to_true ? element.content.strip == '1' : element.content.strip) }
+      else
+        hashinate_by_key(element, convert_1_to_true)
+      end
+    end
+
+    # A modification to hashinate. The new dashboard API returns XML in a different format than
+    # the other calls.  What used to be the element name has become an attribute called "key".
+    def self.hashinate_by_key(response_element, convert_1_to_true=false)
+      response_element.children.reject{|c| c.text? }.inject({}) do |hash, child|
+        
+        # If the node hasn't any child, and is not a list, we want empty strings, not empty hashes,
+        #   except if attributes['nil'] == true
+        hash[child['key']] =
+        if (child['nil'] == 'true')
+          nil
+        elsif (child.children.size == 1 && child.children.first.text?) || (child.children.size == 0 && child['list'] != 'true')
+          anonymous_field_from(child, hash) || (convert_1_to_true ? child.content.strip == '1' : child.content.strip)
+        elsif child['list'] == 'true' && child.children.reject {|subchild| subchild.text?}.all? { |subchild| !subchild.text? && subchild['key'].nil? }
+          child.children.reject{|c| c.text? }.map { |subchild| hash_by_key_or_value_for(subchild, convert_1_to_true)}
+        elsif child['list'] == 'true'
+          hash_by_key_or_value_for(child, convert_1_to_true)
+        else
+          child.children.reject{|c| c.text? }.inject({}) do |subhash, subchild|
+            subhash[subchild['key']] = hash_by_key_or_value_for(subchild, convert_1_to_true)
+            subhash
+          end
+        end
+        hash
+      end
+    end
+
+
 
     def self.booleanize(response)
       response == "1" ? true : false
@@ -113,6 +167,12 @@ module Facebooker
   class RevokeAuthorization < Parser#:nodoc:
     def self.process(data)
       booleanize(data)
+    end
+  end
+
+  class RevokeExtendedPermission < Parser#:nodoc:
+    def self.process(data)
+      booleanize(element('auth_revokeExtendedPermission_response', data).content.strip)
     end
   end
 
@@ -143,6 +203,12 @@ module Facebooker
   class GetSession < Parser#:nodoc:
     def self.process(data)
       hashinate(element('auth_getSession_response', data))
+    end
+  end
+
+  class IsAppUser < Parser#:nodoc:
+    def self.process(data)
+      element('users_isAppUser_response', data).content == '1'
     end
   end
 
@@ -205,6 +271,24 @@ module Facebooker
       element('stream_publish_response', data).content.strip
     end
   end
+  
+  class StreamAddComment < Parser#:nodoc:
+    def self.process(data)
+      element('stream_addComment_response', data).content.strip
+    end
+  end  
+
+  class StreamAddLike < Parser#:nodoc:
+    def self.process(data)
+      element('stream_addLike_response', data).content.strip
+    end
+  end  
+
+  class StreamRemoveLike < Parser#:nodoc:
+    def self.process(data)
+      booleanize(element('stream_removeLike_response', data).content.strip)
+    end
+  end  
 
   class RegisterTemplateBundle < Parser#:nodoc:
     def self.process(data)
@@ -227,6 +311,12 @@ module Facebooker
   class PublishUserAction < Parser#:nodoc:
     def self.process(data)
       element('feed_publishUserAction_response', data).children[1].content.strip == "1"
+    end
+  end
+
+  class UploadNativeStrings < Parser#:nodoc:
+    def self.process(data)
+      element('intl_uploadNativeStrings_response', data).content.strip
     end
   end
 
@@ -271,6 +361,30 @@ module Facebooker
       element('admin_getAllocation_response', data).content.strip
     end
   end
+  
+  class GetPublicInfo < Parser#:nodoc:
+    def self.process(data)
+      hashinate(element('application_getPublicInfo_response', data))
+    end
+  end
+
+  class CommentsAdd < Parser#:nodoc:
+    def self.process(data)
+      element('comments_add_response', data).content.strip
+    end
+  end
+  
+  class CommentsRemove < Parser#:nodoc:
+    def self.process(data)
+      booleanize(data)
+    end
+  end
+  
+  class CommentsGet < Parser#:nodoc:
+    def self.process(data)
+       array_of_hashes(element('comments_get_response', data), 'comment')
+    end
+  end
 
   class BatchRun < Parser #:nodoc:
     class << self
@@ -285,7 +399,7 @@ module Facebooker
       array_of_text_values(element('batch_run_response',data),"batch_run_response_elt").each_with_index do |response,i|
         batch_request=current_batch[i]
         body=Struct.new(:body).new
-        body.body=CGI.unescapeHTML(response)
+        body.body=response
         begin
           batch_request.result=Parser.parse(batch_request.method,body)
         rescue Exception=>ex
@@ -298,6 +412,12 @@ module Facebooker
   class GetAppUsers < Parser#:nodoc:
     def self.process(data)
       array_of_text_values(element('friends_getAppUsers_response', data), 'uid')
+    end
+  end
+
+  class MessageGetThreadsInFolder < Parser#:nodoc:
+    def self.process(data)
+      array_of_hashes(element('message_getThreadsInFolder_response', data), 'thread')
     end
   end
 
@@ -340,6 +460,16 @@ module Facebooker
   class GetAlbums < Parser#nodoc:
     def self.process(data)
       array_of_hashes(element('photos_getAlbums_response', data), 'album')
+    end
+  end
+
+  class GetStream < Parser #:nodoc:
+    def self.process(data)
+      response = {}
+      response[:albums] = array_of_hashes(element('stream_get_response/albums', data), 'album')
+      response[:posts] = array_of_hashes(element('stream_get_response/posts', data), 'stream_post')
+      response[:profile] = array_of_hashes(element('stream_get_response/profiles', data), 'profile')
+      response
     end
   end
 
@@ -399,6 +529,26 @@ module Facebooker
     end
   end
 
+  class FqlMultiquery < Parser#nodoc
+    def self.process(data)
+      root = element('fql_multiquery_response', data)
+      root.children.reject { |child| child.text? }.map do |elm|
+        elm.children.reject { |child| child.text? }.map do |query|
+          if 'name' == query.name
+            query.text
+          else
+            list = query.children.reject { |child| child.text? }
+            if list.length == 0
+              []
+            else
+              [list.first.name, array_of_hashes(query, list.first.name)]
+            end
+          end
+        end
+      end
+    end
+  end
+
   class SetRefHandle < Parser#:nodoc:
     def self.process(data)
       element('fbml_setRefHandle_response', data).content.strip
@@ -425,7 +575,25 @@ module Facebooker
 
   class GetCookies < Parser#:nodoc:
     def self.process(data)
-      array_of_hashes(element('data_getCookie_response', data), 'cookies')
+      array_of_hashes(element('data_getCookies_response', data), 'cookies')
+    end
+  end
+  
+  class EventsRsvp < Parser#:nodoc:
+    def self.process(data)
+       element('events_rsvp_response', data).content.strip
+    end
+  end
+   
+  class EventsCreate < Parser#:nodoc:
+    def self.process(data)
+      element('events_create_response', data).content.strip
+    end
+  end
+  
+  class EventsCancel < Parser#:nodoc:
+    def self.process(data)
+      element('events_cancel_response', data).content.strip
     end
   end
 
@@ -475,7 +643,7 @@ module Facebooker
       end
     end
 
-  private
+    private
     def self.are_friends?(raw_value)
       if raw_value == '1'
         true
@@ -490,6 +658,12 @@ module Facebooker
   class SetStatus < Parser
     def self.process(data)
       element('users_setStatus_response',data).content.strip == '1'
+    end
+  end
+
+  class GetStatus < Parser # :nodoc:
+    def self.process(data)
+      array_of_hashes(element('status_get_response',data),'user_status')
     end
   end
 
@@ -523,6 +697,128 @@ module Facebooker
     end
   end
 
+  class DashboardGetCount < Parser
+    def self.process(data)
+      element('dashboard_getCount_response', data).content.strip
+    end
+  end
+
+  class DashboardSetCount < Parser
+    def self.process(data)
+      element('dashboard_setCount_response', data).content.strip == '1'
+    end
+  end
+
+  class DashboardIncrementCount < Parser
+    def self.process(data)
+      element('dashboard_incrementCount_response', data).content.strip == '1'
+    end
+  end
+
+  class DashboardDecrementCount < Parser
+    def self.process(data)
+      element('dashboard_decrementCount_response', data).content.strip == '1'
+    end
+  end
+  
+  class DashboardMultiGetCount < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_multiGetCount_response', data))
+    end
+  end
+  
+  class DashboardMultiSetCount < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_multiSetCount_response', data), true)
+    end
+  end
+  
+  class DashboardMultiIncrementCount < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_multiIncrementCount_response', data), true)
+    end
+  end
+  
+  class DashboardMultiDecrementCount < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_multiDecrementCount_response', data), true)
+    end
+  end
+  
+  class DashboardAddGlobalNews < Parser
+    def self.process(data)
+      element('dashboard_addGlobalNews_response', data).content.strip
+    end
+  end
+  
+  # Currently, always returns all
+  class DashboardGetGlobalNews < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_getGlobalNews_response', data))
+    end
+  end
+  
+  class DashboardClearGlobalNews < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_clearGlobalNews_response', data), true)
+    end
+  end
+  
+  class DashboardAddNews < Parser
+    def self.process(data)
+      element('dashboard_addNews_response', data).content.strip
+    end
+  end
+  
+  class DashboardGetNews < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_getNews_response', data))
+    end
+  end
+  
+  class DashboardClearNews < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_clearNews_response', data), true)
+    end
+  end
+  
+  class DashboardMultiAddNews < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_multiAddNews_response', data))
+    end
+  end
+  
+  class DashboardMultiClearNews < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_multiClearNews_response', data), true)
+    end
+  end
+  
+  class DashboardMultiGetNews < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_multiGetNews_response', data))
+    end
+  end
+  
+  class DashboardPublishActivity < Parser
+    def self.process(data)
+      element('dashboard_publishActivity_response', data).content.strip
+    end
+  end
+  
+  class DashboardRemoveActivity < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_removeActivity_response', data), true)
+    end
+  end
+  
+  class DashboardGetActivity < Parser
+    def self.process(data)
+      hashinate_by_key(element('dashboard_getActivity_response', data))
+    end
+  end
+
+
   class Errors < Parser#:nodoc:
     EXCEPTIONS = {
       1 	=> Facebooker::Session::UnknownError,
@@ -535,6 +831,7 @@ module Facebooker
       103 => Facebooker::Session::CallOutOfOrder,
       104 => Facebooker::Session::IncorrectSignature,
       120 => Facebooker::Session::InvalidAlbumId,
+      200 => Facebooker::Session::PermissionError,
       250 => Facebooker::Session::ExtendedPermissionRequired,
       321 => Facebooker::Session::AlbumIsFull,
       324 => Facebooker::Session::MissingOrInvalidImageFile,
@@ -562,6 +859,7 @@ module Facebooker
       604 => Facebooker::Session::FQLStatementNotIndexable,
       605 => Facebooker::Session::FQLFunctionDoesNotExist,
       606 => Facebooker::Session::FQLWrongNumberArgumentsPassedToFunction,
+      612 => Facebooker::Session::ReadMailboxExtendedPermissionRequired,
       807 => Facebooker::Session::TemplateBundleInvalid
     }
     def self.process(data)
@@ -577,6 +875,7 @@ module Facebooker
   class Parser
     PARSERS = {
       'facebook.auth.revokeAuthorization' => RevokeAuthorization,
+      'facebook.auth.revokeExtendedPermission' => RevokeExtendedPermission,
       'facebook.auth.createToken' => CreateToken,
       'facebook.auth.getSession' => GetSession,
       'facebook.connect.registerUsers' => RegisterUsers,
@@ -585,8 +884,10 @@ module Facebooker
       'facebook.users.getInfo' => UserInfo,
       'facebook.users.getStandardInfo' => UserStandardInfo,
       'facebook.users.setStatus' => SetStatus,
+      'facebook.status.get' => GetStatus,
       'facebook.users.getLoggedInUser' => GetLoggedInUser,
       'facebook.users.hasAppPermission' => UserHasPermission,
+      'facebook.users.isAppUser' => IsAppUser,
       'facebook.pages.isAdmin' => PagesIsAdmin,
       'facebook.pages.getInfo' => PagesGetInfo,
       'facebook.pages.isFan' => PagesIsFan,
@@ -601,6 +902,7 @@ module Facebooker
       'facebook.feed.deactivateTemplateBundleByID' => DeactivateTemplateBundleByID,
       'facebook.feed.getRegisteredTemplateBundles' => GetRegisteredTemplateBundles,
       'facebook.feed.publishUserAction' => PublishUserAction,
+      'facebook.message.getThreadsInFolder' => MessageGetThreadsInFolder,
       'facebook.notifications.get' => NotificationsGet,
       'facebook.notifications.send' => NotificationsSend,
       'facebook.notifications.sendRequest' => SendRequest,
@@ -618,16 +920,25 @@ module Facebooker
       'facebook.admin.setRestrictionInfo' => SetRestrictionInfo,
       'facebook.admin.getRestrictionInfo' => GetRestrictionInfo,
       'facebook.admin.getAllocation' => GetAllocation,
+      'facebook.application.getPublicInfo' => GetPublicInfo,
       'facebook.batch.run' => BatchRun,
       'facebook.fql.query' => FqlQuery,
+      'facebook.fql.multiquery' => FqlMultiquery,
       'facebook.photos.get' => GetPhotos,
       'facebook.photos.getAlbums' => GetAlbums,
       'facebook.photos.createAlbum' => CreateAlbum,
       'facebook.photos.getTags' => GetTags,
       'facebook.photos.addTag' => AddTags,
       'facebook.photos.upload' => UploadPhoto,
+      'facebook.stream.get' => GetStream,
       'facebook.stream.publish' => StreamPublish,
+      'facebook.stream.addComment' => StreamAddComment,
+      'facebook.stream.addLike' => StreamAddLike,
+      'facebook.stream.removeLike' => StreamRemoveLike,
+      'facebook.events.create' => EventsCreate,
+      'facebook.events.cancel' => EventsCancel,
       'facebook.events.get' => EventsGet,
+      'facebook.events.rsvp' => EventsRsvp,
       'facebook.groups.get' => GroupsGet,
       'facebook.events.getMembers' => EventMembersGet,
       'facebook.groups.getMembers' => GroupGetMembers,
@@ -636,7 +947,31 @@ module Facebooker
       'facebook.data.setUserPreference' => SetPreference,
       'facebook.video.upload' => UploadVideo,
       'facebook.sms.send' => SmsSend,
-      'facebook.sms.canSend' => SmsCanSend
+      'facebook.sms.canSend' => SmsCanSend,
+      'facebook.comments.add' => CommentsAdd,
+      'facebook.comments.remove' => CommentsRemove,
+      'facebook.comments.get' => CommentsGet,
+      'facebook.dashboard.setCount' => DashboardSetCount,
+      'facebook.dashboard.getCount' => DashboardGetCount,
+      'facebook.dashboard.incrementCount' => DashboardIncrementCount,
+      'facebook.dashboard.decrementCount' => DashboardDecrementCount,
+      'facebook.dashboard.multiGetCount' => DashboardMultiGetCount,
+      'facebook.dashboard.multiSetCount' => DashboardMultiSetCount,
+      'facebook.dashboard.multiIncrementCount' => DashboardMultiIncrementCount,
+      'facebook.dashboard.multiDecrementCount' => DashboardMultiDecrementCount,
+      'facebook.dashboard.addGlobalNews' => DashboardAddGlobalNews,
+      'facebook.dashboard.getGlobalNews' => DashboardGetGlobalNews,
+      'facebook.dashboard.clearGlobalNews' => DashboardClearGlobalNews,
+      'facebook.dashboard.addNews' => DashboardAddNews,
+      'facebook.dashboard.getNews' => DashboardGetNews,
+      'facebook.dashboard.clearNews' => DashboardClearNews,
+      'facebook.dashboard.multiAddNews' => DashboardMultiAddNews,
+      'facebook.dashboard.multiGetNews' => DashboardMultiGetNews,
+      'facebook.dashboard.multiClearNews' => DashboardMultiClearNews,
+      'facebook.dashboard.publishActivity' => DashboardPublishActivity,
+      'facebook.dashboard.removeActivity' => DashboardRemoveActivity,
+      'facebook.dashboard.getActivity' => DashboardGetActivity,
+      'facebook.intl.uploadNativeStrings' => UploadNativeStrings
     }
   end
 end

@@ -70,7 +70,7 @@ class TestPublisher < Facebooker::Rails::Publisher
 
   end
 
-   def profile_update_with_profile_main(to,f)
+  def profile_update_with_profile_main(to,f)
     send_as :profile
     recipients to
     from f
@@ -137,14 +137,31 @@ class TestPublisher < Facebooker::Rails::Publisher
     recipients to
   end
 
+  def publish_post_to_own_stream(user)
+    send_as :publish_stream
+    from  user
+    target user
+    attachment({:name => "Facebooker", :href => "http://www.exampple.com"})
+    message "Posting post to own stream"
+    action_links([{:text => "Action Link", :href => "http://www.example.com/action_link"}])
+  end
+
+  def publish_post_to_friends_stream(from, to)
+    send_as :publish_stream
+    from  from
+    target to
+    attachment({:name => "Facebooker", :href => "http://www.exampple.com"})
+    message "Posting post to friends stream"
+    action_links([{:text => "Action Link", :href => "http://www.example.com/action_link"}])
+  end
 end
 
 class Facebooker::Rails::Publisher::FacebookTemplateTest < Test::Unit::TestCase
   FacebookTemplate = Facebooker::Rails::Publisher::FacebookTemplate
-  include Facebooker::Rails::TestHelpers
 
   def setup
     super
+    ENV['FACEBOOK_API_KEY'] = '1234567'
     @template = mock("facebook template")
     FacebookTemplate.stubs(:register).returns(@template)
     FacebookTemplate.clear_cache!
@@ -166,17 +183,16 @@ class Facebooker::Rails::Publisher::FacebookTemplateTest < Test::Unit::TestCase
     assert_equal FacebookTemplate.find_cached(TestPublisher,"simple_user_action"), @template
   end
 
-  def test_find_in_store_should_run_find
-    FacebookTemplate.store.expects(:find_by_template_name).with("TestPublisher::simple_user_action").returns(@template)
+  def test_find_in_db_should_run_find
+    FacebookTemplate.expects(:find_by_template_name).with("1234567: TestPublisher::simple_user_action").returns(@template)
     @template.stubs(:template_changed?).returns(false)
     assert_equal FacebookTemplate.find_in_store(TestPublisher,"simple_user_action"), @template
   end
 
-  def test_find_in_store_should_register_if_not_found
-    FacebookTemplate.store.expects(:find_by_template_name).with("TestPublisher::simple_user_action").returns(nil)
+  def test_find_in_db_should_register_if_not_found
+    FacebookTemplate.expects(:find_by_template_name).with("1234567: TestPublisher::simple_user_action").returns(nil)
     FacebookTemplate.expects(:register).with(TestPublisher,"simple_user_action").returns(@template)
     FacebookTemplate.find_cached(TestPublisher,"simple_user_action")
-
   end
 
   def test_find_in_store_should_check_for_change_if_found
@@ -186,22 +202,15 @@ class Facebooker::Rails::Publisher::FacebookTemplateTest < Test::Unit::TestCase
     FacebookTemplate.find_in_store(TestPublisher,"simple_user_action")
   end
 
-  def test_find_in_store_should_destroy_old_record_if_changed
-    FacebookTemplate.store.stubs(:find_by_template_name).returns(@template)
-    FacebookTemplate.stubs(:hashed_content).returns("MY CONTENT")
-    @template.stubs(:template_changed?).returns(true)
-    @template.expects(:destroy)
-    FacebookTemplate.find_in_store(TestPublisher,"simple_user_action")
-  end
-
-  def test_find_in_store_should_re_register_if_changed
-    FacebookTemplate.store.stubs(:find_by_template_name).with("TestPublisher::simple_user_action").returns(@template)
+  def test_find_in_db_should_re_register_if_changed
+    FacebookTemplate.stubs(:find_by_template_name).with("1234567: TestPublisher::simple_user_action").returns(@template)
     FacebookTemplate.stubs(:hashed_content).returns("MY CONTENT")
     @template.stubs(:template_changed?).returns(true)
     @template.stubs(:destroy)
     FacebookTemplate.expects(:register).with(TestPublisher,"simple_user_action").returns(@template)
     FacebookTemplate.find_in_store(TestPublisher,"simple_user_action")
   end
+
 end
 
 class Facebooker::Rails::Publisher::PublisherTest < Test::Unit::TestCase
@@ -221,6 +230,12 @@ class Facebooker::Rails::Publisher::PublisherTest < Test::Unit::TestCase
 
   def teardown
     super
+  end
+  
+  def test_respond_to
+    assert TestPublisher.respond_to?(:create_action)
+    assert TestPublisher.respond_to?(:deliver_action)
+    assert TestPublisher.respond_to?(:register_action)
   end
 
   def test_create_action
@@ -289,7 +304,7 @@ class Facebooker::Rails::Publisher::PublisherTest < Test::Unit::TestCase
     assert_equal "profile_action",p.profile_action
     assert_equal "mobile_profile",p.mobile_profile
   end
-   def test_create_profile_update_with_profile_main
+  def test_create_profile_update_with_profile_main
     p=TestPublisher.create_profile_update_with_profile_main(@user,@user)
     assert_equal Facebooker::Rails::Publisher::Profile,p.class
     assert_equal "profile",p.profile
@@ -305,7 +320,7 @@ class Facebooker::Rails::Publisher::PublisherTest < Test::Unit::TestCase
     TestPublisher.deliver_profile_update(@user,@user)
   end
 
-   def test_deliver_profile_with_main
+  def test_deliver_profile_with_main
     Facebooker::User.stubs(:new).returns(@user)
     @user.expects(:set_profile_fbml).with('profile', 'mobile_profile', 'profile_action','profile_main')
     TestPublisher.deliver_profile_update_with_profile_main(@user,@user)
@@ -331,6 +346,20 @@ class Facebooker::Rails::Publisher::PublisherTest < Test::Unit::TestCase
    Facebooker::Rails::Publisher::FacebookTemplate.expects(:register)
     TestPublisher.register_user_action
   end
+
+  def test_register_should_deactivate_template_bundle_if_exists
+    @template = mock
+    @template.stubs(:bundle_id).returns(999)
+    @template.stubs(:bundle_id=)
+    @template.stubs(:save!)
+    @session = mock
+    @session.stubs(:register_template_bundle).returns(1000)
+    Facebooker::Session.stubs(:create).returns(@session)
+    Facebooker::Rails::Publisher::FacebookTemplate.stubs(:find_or_initialize_by_template_name).returns(@template)
+    @template.expects(:deactivate)
+    FacebookTemplate.register(TestPublisher, "simple_user_action")
+  end
+
   def test_register_user_action_with_action_links
     ActionController::Base.append_view_path("./test/../../app/views")
     Facebooker::Rails::Publisher::FacebookTemplate.expects(:register)
@@ -406,6 +435,33 @@ class Facebooker::Rails::Publisher::PublisherTest < Test::Unit::TestCase
     end
   end
 
+  def test_publish_post_to_own_stream
+    @user = Facebooker::User.new
+    @user.expects(:publish_to).with(@user, has_entry(:attachment=>instance_of(Hash)))
+
+    TestPublisher.deliver_publish_post_to_own_stream(@user)
+  end
+  
+  def test_publish_stream_sets_action_links
+    @user = Facebooker::User.new
+    stream_post = TestPublisher.create_publish_post_to_own_stream(@user)
+    assert_equal [{:text => "Action Link", :href => "http://www.example.com/action_link"}],stream_post.action_links
+  end
+  
+  def test_publish_stream_sets_target
+    @user = Facebooker::User.new
+    stream_post = TestPublisher.create_publish_post_to_own_stream(@user)
+    assert_equal @user,stream_post.target
+    
+  end
+
+  def test_publish_post_to_friends_stream
+    @from_user = Facebooker::User.new
+    @to_user = Facebooker::User.new
+    @from_user.expects(:publish_to).with(@to_user, has_entry(:action_links=>instance_of(Array)))
+
+    TestPublisher.deliver_publish_post_to_friends_stream(@from_user, @to_user)
+  end
 
   def test_keeps_class_method_missing
     assert_raises(NoMethodError) do
@@ -441,7 +497,7 @@ class Facebooker::Rails::Publisher::PublisherTest < Test::Unit::TestCase
 
   def test_default_url_options
     Facebooker.expects(:facebook_path_prefix).returns("/mike")
-    assert_equal({:host=>"apps.facebook.com/mike"},TestPublisher.default_url_options)
+    assert_equal({:host=>"apps.facebook.com/mike"},TestPublisher.new.default_url_options)
   end
 
   def test_recipients
